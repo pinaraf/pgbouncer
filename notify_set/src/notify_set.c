@@ -36,10 +36,16 @@ notifyset_utility_hook (PlannedStmt *pstmt,
 	if (nodeTag(parsetree) == T_VariableSetStmt)
 	{
 		stmt = (VariableSetStmt *) parsetree;
-		if (stmt->kind == VAR_RESET_ALL)
+		if (stmt->is_local)
+		{
+			// Ignore SET LOCAL
+		}
+		else if (stmt->kind == VAR_RESET_ALL)
 		{
 			Async_Notify("bouncer_notify_set", "RESET");
-		} else {
+		}
+		else
+		{
 			switch(stmt->kind)
 			{
 				case VAR_SET_VALUE:
