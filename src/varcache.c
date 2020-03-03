@@ -61,6 +61,18 @@ const char *varcache_get(VarCache *cache, const char *key)
 				return NULL;
 		}
 	}
+	
+	VarCacheExtended *ext = cache->extended;
+    while (ext != NULL)
+    {
+        if (strcasecmp(key, ext->name->str) == 0) {
+            if (ext->value)
+                return ext->value->str;
+            else
+                return NULL;
+        }
+        ext = ext->next;
+    }
 	return NULL;
 }
 
@@ -79,7 +91,53 @@ bool varcache_set(VarCache *cache, const char *key, const char *value)
 		if (strcasecmp(lk->name, key) == 0)
 			goto set_value;
 	}
-	return false;
+	
+	// Now we must check the extensions
+	VarCacheExtended *ext = cache->extended;
+    while (ext) {
+        if (strcasecmp(key, ext->name->str) == 0) {
+            // Drop old value
+            strpool_decref(ext->value);
+            
+            if (!value)
+                return false;
+            
+            // Set new value
+            pstr = strpool_get(vpool, value, strlen(value));
+            if (!pstr)
+                return false;
+            ext->value = pstr;
+            return true;
+        }
+        ext = ext->next;
+    }
+    
+    if (!value)
+        return false;
+    
+    // Build a new extended entry
+    ext = malloc(sizeof(VarCacheExtended));
+    
+    pstr = strpool_get(vpool, value, strlen(value));
+    if (!pstr) {
+        free(ext);
+        return false;
+    }
+    ext->value = pstr;
+    
+    pstr = strpool_get(vpool, key, strlen(key));
+    if (!pstr) {
+        strpool_decref(ext->value);
+        free(ext);
+        return false;
+    }
+    ext->name = pstr;
+    
+    // prepend in the linked list
+    ext->next = cache->extended;
+    cache->extended = ext;
+    
+    return true;
 
 set_value:
 	/* drop old value */
@@ -140,6 +198,8 @@ bool varcache_apply(PgSocket *server, PgSocket *client, bool *changes_p)
 	const struct var_lookup *lk;
 	int sql_ofs;
 	struct PktBuf *pkt = pktbuf_temp();
+    VarCacheExtended *cext;
+    VarCacheExtended *sext;
 
 	pktbuf_start_packet(pkt, 'Q');
 
@@ -151,6 +211,21 @@ bool varcache_apply(PgSocket *server, PgSocket *client, bool *changes_p)
 		cval = get_value(&client->vars, lk);
 		changes += apply_var(pkt, lk->name, cval, sval);
 	}
+	
+	// Assume that both have been synchronized properly ? This seems risky
+	sext = server->vars.extended;
+    while (sext) {
+        cext = client->vars.extended;
+        while (cext) {
+            if (strcasecmp(cext->name->str, sext->name->str) == 0) {
+                changes += apply_var(pkt, cext->name->str, cext->value, sext->value);
+                break;
+            }
+            cext = cext->next;
+        }
+        sext = sext->next;
+    }
+
 	*changes_p = changes > 0;
 	if (!changes)
 		return true;
@@ -158,7 +233,7 @@ bool varcache_apply(PgSocket *server, PgSocket *client, bool *changes_p)
 	pktbuf_put_char(pkt, 0);
 	pktbuf_finish_packet(pkt);
 
-	slog_debug(server, "varcache_apply: %s", pkt->buf + sql_ofs);
+	slog_info(server, "varcache_apply: %s", pkt->buf + sql_ofs);
 	return pktbuf_send_immediate(pkt, server);
 }
 
@@ -174,15 +249,24 @@ void varcache_fill_unset(VarCache *src, PgSocket *dst)
 			dst->vars.var_list[lk->idx] = srcval;
 		}
 	}
+	// extensions are not used here since they are not parameters
 }
 
 void varcache_clean(VarCache *cache)
 {
 	int i;
+    VarCacheExtended *next;
 	for (i = 0; i < NumVars; i++) {
 		strpool_decref(cache->var_list[i]);
 		cache->var_list[i] = NULL;
 	}
+	while (cache->extended) {
+        strpool_decref(cache->extended->name);
+        strpool_decref(cache->extended->value);
+        next = cache->extended->next;
+        free(cache->extended);
+        cache->extended = next;
+    }
 }
 
 void varcache_add_params(PktBuf *pkt, VarCache *vars)
@@ -194,6 +278,7 @@ void varcache_add_params(PktBuf *pkt, VarCache *vars)
 		if (val)
 			pktbuf_write_ParameterStatus(pkt, lk->name, val->str);
 	}
+	// Extended vars are not parameters
 }
 
 void varcache_deinit(void)
