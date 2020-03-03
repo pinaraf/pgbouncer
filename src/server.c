@@ -149,14 +149,19 @@ static bool handle_server_startup(PgSocket *server, PktHdr *pkt)
 		if (server->exec_on_connect) {
 			server->exec_on_connect = 0;
 			/* deliberately ignore transaction status */
-		} else if (server->pool->db->connect_query) {
-			server->exec_on_connect = 1;
-			slog_debug(server, "server connect ok, send exec_on_connect");
-			SEND_generic(res, server, 'Q', "s", server->pool->db->connect_query);
-			if (!res)
-				disconnect_server(server, false, "exec_on_connect query failed");
-			break;
-		}
+		} else {
+            server->exec_on_connect = 1;
+            SEND_generic(res, server, 'Q', "s", "LISTEN bouncer_notify_set;");
+            if (!res)
+                disconnect_server(server, false, "LISTEN query failed");
+            if (server->pool->db->connect_query) {
+                slog_debug(server, "server connect ok, send exec_on_connect");
+                SEND_generic(res, server, 'Q', "s", server->pool->db->connect_query);
+                if (!res)
+                    disconnect_server(server, false, "exec_on_connect query failed");
+            }
+            break;
+        }
 
 		/* login ok */
 		slog_debug(server, "server login ok, start accepting queries");
@@ -223,6 +228,38 @@ int user_max_connections(PgUser *user)
 	}
 }
 
+static void handle_notify_set(PgSocket *server, const char *payload)
+{
+    PgSocket *client = server->link;
+    char parameter_name[512];
+    char parameter_value[512];
+    size_t equal_sign = 0;
+    // alter varcache !
+    slog_info(client, "Feeding varcache from %s", payload);
+    if (strncmp(payload, "SET", 3) == 0) {
+        // find the equal sign
+        while (payload[equal_sign] != '=' && payload[equal_sign])
+            equal_sign++;
+        // 4 is the length of 'SET '
+        strncpy(parameter_name, payload + 4, equal_sign - 4);
+        parameter_name[equal_sign - 4] = '\0';
+        strcpy(parameter_value, payload + equal_sign + 1);
+        if (strcmp(parameter_name, "application_name") == 0) {
+            slog_info(client, "SKIPPING, special cased !");
+        } else {
+            
+            if (!varcache_set(&client->vars, parameter_name, parameter_value)) {
+                slog_warning(client, "Failed to feed client varcache !");
+            }
+            if (!varcache_set(&server->vars, parameter_name, parameter_value)) {
+                slog_warning(server, "Failed to feed server varcache !");
+            }
+        }
+    } else {
+        slog_warning(client, "TODO");
+    }
+}
+
 /* process packets on logged in connection */
 static bool handle_server_work(PgSocket *server, PktHdr *pkt)
 {
@@ -232,6 +269,9 @@ static bool handle_server_work(PgSocket *server, PktHdr *pkt)
 	SBuf *sbuf = &server->sbuf;
 	PgSocket *client = server->link;
 	bool async_response = false;
+    uint32_t whatever;
+    const char *notification_channel;
+    const char *notification_payload;
 
 	Assert(!server->pool->db->admin);
 
@@ -316,6 +356,34 @@ static bool handle_server_work(PgSocket *server, PktHdr *pkt)
 
 	/* reply to LISTEN, don't change connection state */
 	case 'A':		/* NotificationResponse */
+        /* So A <length:int32> <pid:int32> <channel:string> <channel:string> */
+        // static inline bool mbuf_get_uint32be(struct MBuf *buf, uint32_t *dst_p)
+        // static inline bool mbuf_get_string(struct MBuf *buf, const char **dst_p)
+        
+        if (!mbuf_get_uint32be(&pkt->data, &whatever)) {
+            log_server_error("BLA incomplete 3", pkt);
+            return false;   // Not ready, should not happen
+        }
+        if (!mbuf_get_string(&pkt->data, &notification_channel)) {
+            log_server_error("BLA incomplete 4", pkt);
+            return false;   // Again
+        }
+        if (strcmp(notification_channel, "bouncer_notify_set") == 0) {
+            if (!mbuf_get_string(&pkt->data, &notification_payload)) {
+                log_server_error("BLA incomplete 5", pkt);
+                return false;   // Again
+            }
+            handle_notify_set(server, notification_payload);
+            
+            // We've read the whole packet
+            sbuf_prepare_skip(sbuf, pkt->len);
+            return true;
+        } else {
+            slog_info(server, "Not the packet we expected - %u %s", whatever, notification_channel);
+            // We must rollback the packet...
+            mbuf_rewind_reader(&pkt->data);
+        }
+
 		idle_tx = server->idle_tx;
 		ready = server->ready;
 		async_response = true;
