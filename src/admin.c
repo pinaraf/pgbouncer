@@ -1187,7 +1187,7 @@ static bool admin_cmd_shutdown(PgSocket *admin, const char *arg)
 	cf_shutdown = mode;
 	if (mode == SHUTDOWN_IMMEDIATE) {
 		log_info("SHUTDOWN command issued");
-		event_base_loopbreak(pgb_event_base);
+		uv_stop(pgb_event_loop);
 		/*
 		 * By not running admin_ready the connection is kept open
 		 * until the process is actually shut down.

@@ -40,7 +40,10 @@ static void pktbuf_free_internal(PktBuf *buf)
 
 	log_debug("pktbuf_free(%p)", buf);
 	free(buf->buf);
-	free(buf->ev);
+	if (buf->poll_handle) {
+		uv_poll_stop(buf->poll_handle);
+		free(buf->poll_handle);
+	}
 	free(buf);
 }
 
@@ -66,11 +69,7 @@ PktBuf *pktbuf_dynamic(int start_len)
 	if (!buf)
 		return NULL;
 
-	buf->ev = zmalloc(sizeof(*buf->ev));
-	if (!buf->ev) {
-		pktbuf_free(buf);
-		return NULL;
-	}
+	buf->poll_handle = NULL;  /* Allocated when needed in pktbuf_send_queued */
 	buf->buf = malloc(start_len);
 	if (!buf->buf) {
 		pktbuf_free(buf);
@@ -128,13 +127,19 @@ bool pktbuf_send_immediate(PktBuf *buf, PgSocket *sk)
 	return res == amount;
 }
 
-static void pktbuf_send_func(evutil_socket_t fd, short flags, void *arg)
+static void pktbuf_send_func(uv_poll_t *handle, int status, int events)
 {
-	PktBuf *buf = arg;
+	PktBuf *buf = handle->data;
 	SBuf *sbuf = &buf->queued_dst->sbuf;
-	int amount, res;
+	int amount, res, err;
 
-	log_debug("pktbuf_send_func(%" PRId64 ", %d, %p)", (int64_t)fd, (int)flags, buf);
+	log_debug("pktbuf_send_func(%p, %d, %d)", buf, status, events);
+
+	if (status < 0) {
+		log_error("pktbuf_send_func: poll error: %s", uv_strerror(status));
+		pktbuf_free(buf);
+		return;
+	}
 
 	if (buf->failed)
 		return;
@@ -153,10 +158,9 @@ static void pktbuf_send_func(evutil_socket_t fd, short flags, void *arg)
 	buf->send_pos += res;
 
 	if (buf->send_pos < buf->write_pos) {
-		event_assign(buf->ev, pgb_event_base, fd, EV_WRITE, pktbuf_send_func, buf);
-		res = event_add(buf->ev, NULL);
-		if (res < 0) {
-			log_error("pktbuf_send_func: %s", strerror(errno));
+		err = uv_poll_start(buf->poll_handle, UV_WRITABLE, pktbuf_send_func);
+		if (err < 0) {
+			log_error("pktbuf_send_func: uv_poll_start failed: %s", uv_strerror(err));
 			pktbuf_free(buf);
 		}
 	} else {
@@ -166,6 +170,7 @@ static void pktbuf_send_func(evutil_socket_t fd, short flags, void *arg)
 
 bool pktbuf_send_queued(PktBuf *buf, PgSocket *sk)
 {
+	int err;
 	Assert(!buf->sending);
 	Assert(!buf->fixed_buf);
 
@@ -175,7 +180,27 @@ bool pktbuf_send_queued(PktBuf *buf, PgSocket *sk)
 	} else {
 		buf->sending = true;
 		buf->queued_dst = sk;
-		pktbuf_send_func(sk->sbuf.sock, EV_WRITE, buf);
+		
+		/* Allocate and initialize poll handle */
+		buf->poll_handle = malloc(sizeof(uv_poll_t));
+		if (!buf->poll_handle) {
+			log_error("pktbuf_send_queued: malloc failed");
+			pktbuf_free(buf);
+			return false;
+		}
+		
+		err = uv_poll_init(pgb_event_loop, buf->poll_handle, sk->sbuf.sock);
+		if (err < 0) {
+			log_error("pktbuf_send_queued: uv_poll_init failed: %s", uv_strerror(err));
+			free(buf->poll_handle);
+			buf->poll_handle = NULL;
+			pktbuf_free(buf);
+			return false;
+		}
+		buf->poll_handle->data = buf;
+		
+		/* Call the send function directly to attempt immediate send */
+		pktbuf_send_func(buf->poll_handle, 0, UV_WRITABLE);
 		return true;
 	}
 }

@@ -30,7 +30,7 @@ struct PktBuf {
 	int pktlen_pos;
 
 	int send_pos;
-	struct event *ev;
+	uv_poll_t *poll_handle;
 	PgSocket *queued_dst;
 
 	bool failed : 1;

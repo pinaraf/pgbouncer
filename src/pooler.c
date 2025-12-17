@@ -30,7 +30,7 @@ struct ListenSocket {
 	struct List node;
 	int fd;
 	bool active;
-	struct event ev;
+	uv_poll_t poll_handle;
 	PgAddr addr;
 };
 
@@ -52,8 +52,8 @@ static bool pooler_active = false;
 static bool listen_addr_empty = true;
 
 /* on accept() failure sleep 5 seconds */
-static struct event ev_err;
-static struct timeval err_timeout = {5, 0};
+static uv_timer_t ev_err;
+static uint64_t err_timeout_ms = 5000;
 
 static void tune_accept(int sock, bool on);
 
@@ -72,8 +72,9 @@ void cleanup_tcp_sockets(void)
 		if (pga_is_unix(&ls->addr)) {
 			continue;
 		}
-		if (event_del(&ls->ev) < 0) {
-			log_warning("cleanup_sockets, event_del: %s", strerror(errno));
+		if (ls->active) {
+			uv_poll_stop(&ls->poll_handle);
+			uv_close((uv_handle_t *)&ls->poll_handle, NULL);
 		}
 		if (ls->fd > 0) {
 			safe_close(ls->fd);
@@ -95,8 +96,9 @@ void cleanup_unix_sockets(void)
 
 	statlist_for_each_safe(el, &sock_list, tmp_l) {
 		ls = container_of(el, struct ListenSocket, node);
-		if (event_del(&ls->ev) < 0) {
-			log_warning("cleanup_sockets, event_del: %s", strerror(errno));
+		if (ls->active) {
+			uv_poll_stop(&ls->poll_handle);
+			uv_close((uv_handle_t *)&ls->poll_handle, NULL);
 		}
 		if (ls->fd > 0) {
 			safe_close(ls->fd);
@@ -323,7 +325,7 @@ void pooler_tune_accept(bool on)
 	}
 }
 
-static void err_wait_func(evutil_socket_t sock, short flags, void *arg)
+static void err_wait_func(uv_timer_t *handle)
 {
 	if (cf_pause_mode != P_SUSPEND)
 		resume_pooler();
@@ -354,9 +356,9 @@ static const char *conninfo(const PgSocket *sk)
 }
 
 /* got new connection, associate it with client struct */
-static void pool_accept(evutil_socket_t sock, short flags, void *arg)
+static void pool_accept(uv_poll_t *handle, int status, int events)
 {
-	struct ListenSocket *ls = arg;
+	struct ListenSocket *ls = handle->data;
 	int fd;
 	PgSocket *client;
 	union {
@@ -368,13 +370,18 @@ static void pool_accept(evutil_socket_t sock, short flags, void *arg)
 	socklen_t len = sizeof(raddr);
 	bool is_unix = pga_is_unix(&ls->addr);
 
-	if (!(flags & EV_READ)) {
-		log_warning("no EV_READ in pool_accept");
+	if (status < 0) {
+		log_warning("poll error in pool_accept: %s", uv_strerror(status));
+		return;
+	}
+
+	if (!(events & UV_READABLE)) {
+		log_warning("no UV_READABLE in pool_accept");
 		return;
 	}
 loop:
 	/* get fd */
-	fd = safe_accept(sock, &raddr.sa, &len);
+	fd = safe_accept(ls->fd, &raddr.sa, &len);
 	if (fd < 0) {
 		if (errno == EAGAIN)
 			return;
@@ -386,8 +393,9 @@ loop:
 		 * wait a bit, hope that admin resolves somehow
 		 */
 		log_error("accept() failed: %s", strerror(errno));
-		evtimer_assign(&ev_err, pgb_event_base, err_wait_func, NULL);
-		safe_evtimer_add(&ev_err, &err_timeout);
+		uv_timer_init(pgb_event_loop, &ev_err);
+		ev_err.data = NULL;
+		uv_timer_start(&ev_err, err_wait_func, err_timeout_ms, 0);
 		suspend_pooler();
 		return;
 	}
@@ -450,10 +458,7 @@ void suspend_pooler(void)
 		ls = container_of(el, struct ListenSocket, node);
 		if (!ls->active)
 			continue;
-		if (event_del(&ls->ev) < 0) {
-			log_warning("suspend_pooler, event_del: %s", strerror(errno));
-			return;
-		}
+		uv_poll_stop(&ls->poll_handle);
 		ls->active = false;
 	}
 	pooler_active = false;
@@ -463,15 +468,22 @@ void resume_pooler(void)
 {
 	struct List *el;
 	struct ListenSocket *ls;
+	int err;
 
 	need_active = true;
 	statlist_for_each(el, &sock_list) {
 		ls = container_of(el, struct ListenSocket, node);
 		if (ls->active)
 			continue;
-		event_assign(&ls->ev, pgb_event_base, ls->fd, EV_READ | EV_PERSIST, pool_accept, ls);
-		if (event_add(&ls->ev, NULL) < 0) {
-			log_warning("event_add failed: %s", strerror(errno));
+		err = uv_poll_init(pgb_event_loop, &ls->poll_handle, ls->fd);
+		if (err < 0) {
+			log_warning("uv_poll_init failed: %s", uv_strerror(err));
+			return;
+		}
+		ls->poll_handle.data = ls;
+		err = uv_poll_start(&ls->poll_handle, UV_READABLE, pool_accept);
+		if (err < 0) {
+			log_warning("uv_poll_start failed: %s", uv_strerror(err));
 			return;
 		}
 		ls->active = true;

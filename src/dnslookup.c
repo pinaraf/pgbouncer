@@ -109,7 +109,7 @@ struct DNSContext {
 	struct List zone_list;		/* DNSZone->lnode */
 
 	struct DNSZone *cur_zone;
-	struct event ev_zone_timer;
+	uv_timer_t ev_zone_timer;
 	int zone_state;
 
 	int active;	/* number of in-flight queries */
@@ -236,7 +236,7 @@ struct GaiRequest {
 struct GaiContext {
 	struct DNSContext *ctx;
 	struct List gairq_list;
-	struct event ev;
+	uv_poll_t poll_handle;
 	struct sigevent sev;
 };
 
@@ -423,10 +423,10 @@ static void impl_release(struct DNSContext *ctx)
 #define MAX_CARES_FDS 16
 
 struct XaresFD {
-	struct event ev;		/* fd event state is persistent */
+	uv_poll_t poll_handle;		/* fd poll handle */
 	struct XaresMeta *meta;		/* pointer to parent context */
 	ares_socket_t sock;		/* socket value */
-	short wait;			/* EV_READ / EV_WRITE */
+	int wait;			/* UV_READABLE / UV_WRITABLE */
 	bool in_use;			/* is this slot assigned */
 };
 
@@ -441,7 +441,7 @@ struct XaresMeta {
 	struct XaresFD fds[MAX_CARES_FDS];
 
 	/* timer event is one-shot */
-	struct event ev_timer;
+	uv_timer_t ev_timer;
 
 	/* is timer activated? */
 	bool timer_active;
@@ -457,10 +457,10 @@ const char *adns_get_backend(void)
 }
 
 
-/* called by libevent on timer timeout */
-static void xares_timer_cb(evutil_socket_t sock, short flags, void *arg)
+/* called by libuv on timer timeout */
+static void xares_timer_cb(uv_timer_t *handle)
 {
-	struct DNSContext *ctx = arg;
+	struct DNSContext *ctx = handle->data;
 	struct XaresMeta *meta = ctx->edns;
 
 	ares_process_fd(meta->chan, ARES_SOCKET_BAD, ARES_SOCKET_BAD);
@@ -469,15 +469,20 @@ static void xares_timer_cb(evutil_socket_t sock, short flags, void *arg)
 	meta->got_events = true;
 }
 
-/* called by libevent on fd event */
-static void xares_fd_cb(evutil_socket_t sock, short flags, void *arg)
+/* called by libuv on fd event */
+static void xares_fd_cb(uv_poll_t *handle, int status, int events)
 {
-	struct XaresFD *xfd = arg;
+	struct XaresFD *xfd = handle->data;
 	struct XaresMeta *meta = xfd->meta;
 	ares_socket_t r, w;
 
-	r = (flags & EV_READ) ? xfd->sock : ARES_SOCKET_BAD;
-	w = (flags & EV_WRITE) ? xfd->sock : ARES_SOCKET_BAD;
+	if (status < 0) {
+		log_warning("xares_fd_cb: poll error: %s", uv_strerror(status));
+		return;
+	}
+
+	r = (events & UV_READABLE) ? xfd->sock : ARES_SOCKET_BAD;
+	w = (events & UV_WRITABLE) ? xfd->sock : ARES_SOCKET_BAD;
 	ares_process_fd(meta->chan, r, w);
 
 	meta->got_events = true;
@@ -519,12 +524,13 @@ static void xares_state_cb(void *arg, ares_socket_t sock, int r, int w)
 	struct XaresMeta *meta = ctx->edns;
 	struct XaresFD *xfd;
 	int pos;
-	short new_wait = 0;
+	int new_wait = 0;
+	int err;
 
 	if (r)
-		new_wait |= EV_READ;
+		new_wait |= UV_READABLE;
 	if (w)
-		new_wait |= EV_WRITE;
+		new_wait |= UV_WRITABLE;
 
 	/* find socket */
 	for (pos = 0; pos < meta->max_fds; pos++) {
@@ -547,12 +553,18 @@ static void xares_state_cb(void *arg, ares_socket_t sock, int r, int w)
 
 re_set:
 	if (xfd->wait)
-		event_del(&xfd->ev);
+		uv_poll_stop(&xfd->poll_handle);
 	xfd->wait = new_wait;
 	if (new_wait) {
-		event_assign(&xfd->ev, pgb_event_base, sock, new_wait | EV_PERSIST, xares_fd_cb, xfd);
-		if (event_add(&xfd->ev, NULL) < 0)
-			log_warning("adns: event_add failed: %s", strerror(errno));
+		err = uv_poll_init(pgb_event_loop, &xfd->poll_handle, sock);
+		if (err < 0) {
+			log_warning("adns: uv_poll_init failed: %s", uv_strerror(err));
+			return;
+		}
+		xfd->poll_handle.data = xfd;
+		err = uv_poll_start(&xfd->poll_handle, new_wait, xares_fd_cb);
+		if (err < 0)
+			log_warning("adns: uv_poll_start failed: %s", uv_strerror(err));
 	} else {
 		xfd->in_use = false;
 	}
@@ -606,20 +618,25 @@ static void impl_per_loop(struct DNSContext *ctx)
 {
 	struct timeval tv, *tvp;
 	struct XaresMeta *meta = ctx->edns;
+	uint64_t timeout_ms;
+	int err;
 
 	if (!meta->got_events)
 		return;
 
 	if (meta->timer_active) {
-		event_del(&meta->ev_timer);
+		uv_timer_stop(&meta->ev_timer);
 		meta->timer_active = false;
 	}
 
 	tvp = ares_timeout(meta->chan, NULL, &tv);
 	if (tvp != NULL) {
-		if (event_add(&meta->ev_timer, tvp) < 0)
-			log_warning("impl_per_loop: event_add failed: %s", strerror(errno));
-		meta->timer_active = true;
+		timeout_ms = tvp->tv_sec * 1000 + tvp->tv_usec / 1000;
+		err = uv_timer_start(&meta->ev_timer, xares_timer_cb, timeout_ms, 0);
+		if (err < 0)
+			log_warning("impl_per_loop: uv_timer_start failed: %s", uv_strerror(err));
+		else
+			meta->timer_active = true;
 	}
 
 	meta->got_events = false;
@@ -671,7 +688,8 @@ static bool impl_init(struct DNSContext *ctx)
 
 	ares_set_socket_callback(meta->chan, xares_new_socket_cb, ctx);
 
-	evtimer_assign(&meta->ev_timer, pgb_event_base, xares_timer_cb, ctx);
+	uv_timer_init(pgb_event_loop, &meta->ev_timer);
+	meta->ev_timer.data = ctx;
 
 	ctx->edns = meta;
 	return true;
@@ -686,7 +704,7 @@ static void impl_release(struct DNSContext *ctx)
 	ares_library_cleanup();
 
 	if (meta->timer_active)
-		event_del(&meta->ev_timer);
+		uv_timer_stop(&meta->ev_timer);
 
 	free(meta);
 	ctx->edns = NULL;
@@ -1064,9 +1082,9 @@ static void zone_register(struct DNSContext *ctx, struct DNSRequest *req)
 	req->zone = z;
 }
 
-static void zone_timer(evutil_socket_t fd, short flg, void *arg)
+static void zone_timer(uv_timer_t *handle)
 {
-	struct DNSContext *ctx = arg;
+	struct DNSContext *ctx = handle->data;
 	struct List *el;
 	struct DNSZone *z;
 
@@ -1085,13 +1103,16 @@ static void zone_timer(evutil_socket_t fd, short flg, void *arg)
 
 static void launch_zone_timer(struct DNSContext *ctx)
 {
-	struct timeval tv;
+	uint64_t timeout_ms;
+	int err;
 
-	tv.tv_sec = cf_dns_zone_check_period / USEC;
-	tv.tv_usec = cf_dns_zone_check_period % USEC;
+	timeout_ms = cf_dns_zone_check_period / 1000;
 
-	evtimer_assign(&ctx->ev_zone_timer, pgb_event_base, zone_timer, ctx);
-	safe_evtimer_add(&ctx->ev_zone_timer, &tv);
+	uv_timer_init(pgb_event_loop, &ctx->ev_zone_timer);
+	ctx->ev_zone_timer.data = ctx;
+	err = uv_timer_start(&ctx->ev_zone_timer, zone_timer, timeout_ms, 0);
+	if (err < 0)
+		log_warning("launch_zone_timer: uv_timer_start failed: %s", uv_strerror(err));
 
 	ctx->zone_state = 2;
 }
@@ -1100,7 +1121,7 @@ void adns_zone_cache_maint(struct DNSContext *ctx)
 {
 	if (!cf_dns_zone_check_period) {
 		if (ctx->zone_state == 2) {
-			event_del(&ctx->ev_zone_timer);
+			uv_timer_stop(&ctx->ev_zone_timer);
 			ctx->zone_state = 0;
 		}
 		ctx->cur_zone = NULL;

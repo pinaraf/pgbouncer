@@ -69,7 +69,7 @@ struct SBufIO {
  * protocol handler is called that decides what to do.
  */
 struct SBuf {
-	struct event ev;	/* libevent handle */
+	uv_poll_t poll_handle;	/* libuv poll handle */
 
 	uint8_t wait_type;	/* track wait state */
 	uint8_t pkt_action;	/* method for handling current pkt */
@@ -134,8 +134,9 @@ bool sbuf_queue_full_packet(SBuf *sbuf, SBuf *dst, PktHdr *pkt) _MUSTCHECK;
 
 bool sbuf_answer(SBuf *sbuf, const void *buf, size_t len)  _MUSTCHECK;
 
-bool sbuf_continue_with_callback(SBuf *sbuf, event_callback_fn cb)  _MUSTCHECK;
-bool sbuf_use_callback_once(SBuf *sbuf, short ev, event_callback_fn user_cb) _MUSTCHECK;
+/* External callback functions temporarily disabled during libuv port */
+/* bool sbuf_continue_with_callback(SBuf *sbuf, event_callback_fn cb)  _MUSTCHECK; */
+/* bool sbuf_use_callback_once(SBuf *sbuf, short ev, event_callback_fn user_cb) _MUSTCHECK; */
 
 /*
  * Returns true if SBuf is has no data buffered

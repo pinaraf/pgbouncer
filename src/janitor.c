@@ -24,9 +24,8 @@
 
 #include <usual/slab.h>
 
-/* do full maintenance 3x per second */
-static struct timeval full_maint_period = {0, USEC / 3};
-static struct event full_maint_ev;
+static uint64_t full_maint_period_ms = USEC / (3 * 1000);  /* 3x per second converted to ms */
+static uv_timer_t full_maint_ev;
 extern bool any_user_level_server_timeout_set;
 extern bool any_user_level_client_timeout_set;
 
@@ -752,7 +751,7 @@ static void cleanup_inactive_autodatabases(void)
 }
 
 /* full-scale maintenance, done only occasionally */
-static void do_full_maint(evutil_socket_t sock, short flags, void *arg)
+static void do_full_maint(uv_timer_t *handle)
 {
 	struct List *item, *tmp;
 	PgPool *pool;
@@ -826,7 +825,7 @@ static void do_full_maint(evutil_socket_t sock, short flags, void *arg)
 		log_info("server connections dropped, exiting");
 		cf_shutdown = SHUTDOWN_IMMEDIATE;
 		cleanup_unix_sockets();
-		event_base_loopbreak(pgb_event_base);
+		uv_stop(pgb_event_loop);
 		return;
 	}
 
@@ -834,7 +833,7 @@ static void do_full_maint(evutil_socket_t sock, short flags, void *arg)
 		log_info("client connections dropped, exiting");
 		cf_shutdown = SHUTDOWN_IMMEDIATE;
 		cleanup_unix_sockets();
-		event_base_loopbreak(pgb_event_base);
+		uv_stop(pgb_event_loop);
 		return;
 	}
 
@@ -844,10 +843,12 @@ static void do_full_maint(evutil_socket_t sock, short flags, void *arg)
 /* first-time initialization */
 void janitor_setup(void)
 {
+	int err;
 	/* launch maintenance */
-	event_assign(&full_maint_ev, pgb_event_base, -1, EV_PERSIST, do_full_maint, NULL);
-	if (event_add(&full_maint_ev, &full_maint_period) < 0)
-		log_warning("event_add failed: %s", strerror(errno));
+	uv_timer_init(pgb_event_loop, &full_maint_ev);
+	err = uv_timer_start(&full_maint_ev, do_full_maint, full_maint_period_ms, full_maint_period_ms);
+	if (err < 0)
+		log_warning("uv_timer_start failed: %s", uv_strerror(err));
 }
 
 void kill_pool(PgPool *pool)

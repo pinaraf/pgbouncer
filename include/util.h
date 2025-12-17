@@ -55,7 +55,8 @@ void fill_local_addr(PgSocket *sk, int fd, bool is_unix);
 
 
 void rescue_timers(void);
-void safe_evtimer_add(struct event *ev, struct timeval *tv);
+/* Timer utility - no longer needed with libuv */
+/* void safe_evtimer_add(struct event *ev, struct timeval *tv); */
 
 /* log truncated strings */
 #define safe_strcpy(dst, src, dstlen) do { \

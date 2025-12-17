@@ -51,8 +51,8 @@ AC_SEARCH_LIBS(gethostbyname, nsl)
 AC_SEARCH_LIBS(hstrerror, resolv)
 AC_CHECK_FUNCS(lstat)
 
-dnl Find libevent
-PKG_CHECK_MODULES(LIBEVENT, libevent)
+dnl Find libuv
+PKG_CHECK_MODULES(LIBUV, libuv)
 
 dnl Check for PAM authentication support
 pam_support=no
