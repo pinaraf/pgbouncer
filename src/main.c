@@ -70,8 +70,8 @@ static void usage(const char *exe)
 	exit(0);
 }
 
-/* global libevent handle */
-struct event_base *pgb_event_base;
+/* global libuv handle */
+uv_loop_t *pgb_event_loop;
 
 /* async dns handler */
 struct DNSContext *adns;
@@ -529,10 +529,10 @@ bool load_config(void)
  * handle_* functions are not actual signal handlers but called from
  * event_loop() so they have no restrictions what they can do.
  */
-static struct event ev_sigterm;
-static struct event ev_sigint;
+static uv_signal_t ev_sigterm;
+static uv_signal_t ev_sigint;
 
-static void handle_sigterm(evutil_socket_t sock, short flags, void *arg)
+static void handle_sigterm(uv_signal_t *handle, int signum)
 {
 	if (cf_shutdown) {
 		log_info("got SIGTERM while shutting down, fast exit");
@@ -549,7 +549,7 @@ static void handle_sigterm(evutil_socket_t sock, short flags, void *arg)
 	cleanup_tcp_sockets();
 }
 
-static void handle_sigint(evutil_socket_t sock, short flags, void *arg)
+static void handle_sigint(uv_signal_t *handle, int signum)
 {
 	if (cf_shutdown) {
 		log_info("got SIGINT while shutting down, fast exit");
@@ -569,19 +569,19 @@ static void handle_sigint(evutil_socket_t sock, short flags, void *arg)
 
 #ifndef WIN32
 
-static struct event ev_sigquit;
-static struct event ev_sigusr1;
-static struct event ev_sigusr2;
-static struct event ev_sighup;
+static uv_signal_t ev_sigquit;
+static uv_signal_t ev_sigusr1;
+static uv_signal_t ev_sigusr2;
+static uv_signal_t ev_sighup;
 
-static void handle_sigquit(evutil_socket_t sock, short flags, void *arg)
+static void handle_sigquit(uv_signal_t *handle, int signum)
 {
 	log_info("got SIGQUIT, fast exit");
 	/* pidfile cleanup happens via atexit() */
 	exit(0);
 }
 
-static void handle_sigusr1(int sock, short flags, void *arg)
+static void handle_sigusr1(uv_signal_t *handle, int signum)
 {
 	if (cf_pause_mode == P_NONE) {
 		log_info("got SIGUSR1, pausing all activity");
@@ -591,7 +591,7 @@ static void handle_sigusr1(int sock, short flags, void *arg)
 	}
 }
 
-static void handle_sigusr2(int sock, short flags, void *arg)
+static void handle_sigusr2(uv_signal_t *handle, int signum)
 {
 	if (cf_shutdown) {
 		log_info("got SIGUSR2 while shutting down, ignoring");
@@ -629,7 +629,7 @@ static void notify_reloading(void)
 #endif
 }
 
-static void handle_sighup(int sock, short flags, void *arg)
+static void handle_sighup(uv_signal_t *handle, int signum)
 {
 	log_info("got SIGHUP, re-reading config");
 	notify_reloading();
@@ -656,35 +656,35 @@ static void signal_setup(void)
 
 	/* install handlers */
 
-	evsignal_assign(&ev_sigusr1, pgb_event_base, SIGUSR1, handle_sigusr1, NULL);
-	err = evsignal_add(&ev_sigusr1, NULL);
+	uv_signal_init(pgb_event_loop, &ev_sigusr1);
+	err = uv_signal_start(&ev_sigusr1, handle_sigusr1, SIGUSR1);
 	if (err < 0)
-		fatal_perror("evsignal_add");
+		fatal("uv_signal_start SIGUSR1: %s", uv_strerror(err));
 
-	evsignal_assign(&ev_sigusr2, pgb_event_base, SIGUSR2, handle_sigusr2, NULL);
-	err = evsignal_add(&ev_sigusr2, NULL);
+	uv_signal_init(pgb_event_loop, &ev_sigusr2);
+	err = uv_signal_start(&ev_sigusr2, handle_sigusr2, SIGUSR2);
 	if (err < 0)
-		fatal_perror("evsignal_add");
+		fatal("uv_signal_start SIGUSR2: %s", uv_strerror(err));
 
-	evsignal_assign(&ev_sighup, pgb_event_base, SIGHUP, handle_sighup, NULL);
-	err = evsignal_add(&ev_sighup, NULL);
+	uv_signal_init(pgb_event_loop, &ev_sighup);
+	err = uv_signal_start(&ev_sighup, handle_sighup, SIGHUP);
 	if (err < 0)
-		fatal_perror("evsignal_add");
+		fatal("uv_signal_start SIGHUP: %s", uv_strerror(err));
 
-	evsignal_assign(&ev_sigquit, pgb_event_base, SIGQUIT, handle_sigquit, NULL);
-	err = evsignal_add(&ev_sigquit, NULL);
+	uv_signal_init(pgb_event_loop, &ev_sigquit);
+	err = uv_signal_start(&ev_sigquit, handle_sigquit, SIGQUIT);
 	if (err < 0)
-		fatal_perror("evsignal_add");
+		fatal("uv_signal_start SIGQUIT: %s", uv_strerror(err));
 #endif
-	evsignal_assign(&ev_sigterm, pgb_event_base, SIGTERM, handle_sigterm, NULL);
-	err = evsignal_add(&ev_sigterm, NULL);
+	uv_signal_init(pgb_event_loop, &ev_sigterm);
+	err = uv_signal_start(&ev_sigterm, handle_sigterm, SIGTERM);
 	if (err < 0)
-		fatal_perror("evsignal_add");
+		fatal("uv_signal_start SIGTERM: %s", uv_strerror(err));
 
-	evsignal_assign(&ev_sigint, pgb_event_base, SIGINT, handle_sigint, NULL);
-	err = evsignal_add(&ev_sigint, NULL);
+	uv_signal_init(pgb_event_loop, &ev_sigint);
+	err = uv_signal_start(&ev_sigint, handle_sigint, SIGINT);
 	if (err < 0)
-		fatal_perror("evsignal_add");
+		fatal("uv_signal_start SIGINT: %s", uv_strerror(err));
 }
 
 /*
@@ -884,10 +884,10 @@ static void main_loop_once(void)
 
 	reset_time_cache();
 
-	err = event_base_loop(pgb_event_base, EVLOOP_ONCE);
+	err = uv_run(pgb_event_loop, UV_RUN_ONCE);
 	if (err < 0) {
 		if (errno != EINTR)
-			log_warning("event_loop failed: %s", strerror(errno));
+			log_warning("uv_run failed: %s", uv_strerror(err));
 	}
 	ldap_poll();
 	pam_poll();
@@ -902,11 +902,13 @@ static void main_loop_once(void)
 
 static void takeover_part1(void)
 {
-	/* use temporary libevent base */
-	struct event_base *evtmp;
+	/* use temporary libuv loop */
+	uv_loop_t *loop_tmp;
+	uv_loop_t tmp_loop;
 
-	evtmp = pgb_event_base;
-	pgb_event_base = event_base_new();
+	loop_tmp = pgb_event_loop;
+	uv_loop_init(&tmp_loop);
+	pgb_event_loop = &tmp_loop;
 
 	if (!cf_unix_socket_dir || !*cf_unix_socket_dir)
 		die("cannot reboot if unix dir not configured");
@@ -926,8 +928,8 @@ static void takeover_part1(void)
 	while (cf_reboot)
 		main_loop_once();
 
-	event_base_free(pgb_event_base);
-	pgb_event_base = evtmp;
+	uv_loop_close(&tmp_loop);
+	pgb_event_loop = loop_tmp;
 }
 
 static void dns_setup(void)
@@ -971,7 +973,8 @@ static void cleanup(void)
 	objects_cleanup();
 	sbuf_cleanup();
 
-	event_base_free(pgb_event_base);
+	uv_loop_close(pgb_event_loop);
+	free(pgb_event_loop);
 
 	tls_deinit();
 	varcache_deinit();
@@ -1151,8 +1154,11 @@ int main(int argc, char *argv[])
 
 	/* initialize subsystems, order important */
 	srandom(time(NULL) ^ getpid());
-	if (!(pgb_event_base = event_base_new()))
-		die("event_base_new() failed");
+	pgb_event_loop = malloc(sizeof(uv_loop_t));
+	if (!pgb_event_loop)
+		die("malloc failed for event loop");
+	if (uv_loop_init(pgb_event_loop) < 0)
+		die("uv_loop_init() failed");
 	dns_setup();
 	signal_setup();
 	janitor_setup();
@@ -1169,8 +1175,8 @@ int main(int argc, char *argv[])
 
 	write_pidfile();
 
-	log_info("process up: %s, libevent %s (%s), adns: %s, tls: %s", PACKAGE_STRING,
-		 event_get_version(), event_base_get_method(pgb_event_base), adns_get_backend(),
+	log_info("process up: %s, libuv %s, adns: %s, tls: %s", PACKAGE_STRING,
+		 uv_version_string(), adns_get_backend(),
 		 tls_backend_version());
 
 	sd_notify(0, "READY=1");

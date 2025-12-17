@@ -69,7 +69,7 @@ struct SBufIO {
  * protocol handler is called that decides what to do.
  */
 struct SBuf {
-	struct event ev;	/* libevent handle */
+	uv_poll_t poll_handle;	/* libuv poll handle */
 
 	uint8_t wait_type;	/* track wait state */
 	uint8_t pkt_action;	/* method for handling current pkt */

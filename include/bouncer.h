@@ -29,8 +29,7 @@
 #include <usual/aatree.h>
 #include <usual/socket.h>
 
-#include <event2/event.h>
-#include <event2/event_struct.h>
+#include <uv.h>
 
 // Needed by cryptohash.h
 #define uint8 uint8_t
@@ -62,8 +61,8 @@
 #endif
 
 
-/* global libevent handle */
-extern struct event_base *pgb_event_base;
+/* global libuv handle */
+extern uv_loop_t *pgb_event_loop;
 
 
 /* each state corresponds to a list */
