@@ -18,7 +18,7 @@
 
 #include "bouncer.h"
 
-static struct event ev_stats;
+static uv_timer_t ev_stats;
 static usec_t old_stamp, new_stamp;
 
 static void reset_stats(PgStats *stat)
@@ -351,7 +351,7 @@ bool show_stat_totals(PgSocket *client, struct StatList *pool_list)
 	return true;
 }
 
-static void refresh_stats(evutil_socket_t s, short flags, void *arg)
+static void refresh_stats(uv_timer_t *handle)
 {
 	struct List *item;
 	PgPool *pool;
@@ -421,13 +421,15 @@ static void refresh_stats(evutil_socket_t s, short flags, void *arg)
 
 void stats_setup(void)
 {
-	struct timeval period = { cf_stats_period, 0 };
+	uint64_t period_ms = cf_stats_period * 1000;
+	int err;
 
 	new_stamp = get_cached_time();
 	old_stamp = new_stamp - USEC;
 
 	/* launch stats */
-	event_assign(&ev_stats, pgb_event_base, -1, EV_PERSIST, refresh_stats, NULL);
-	if (event_add(&ev_stats, &period) < 0)
-		log_warning("event_add failed: %s", strerror(errno));
+	uv_timer_init(pgb_event_loop, &ev_stats);
+	err = uv_timer_start(&ev_stats, refresh_stats, period_ms, period_ms);
+	if (err < 0)
+		log_warning("uv_timer_start failed: %s", uv_strerror(err));
 }
