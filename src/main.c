@@ -828,8 +828,8 @@ static void check_limits(void)
 	struct List *item;
 	PgDatabase *db;
 
-	log_noise("event: %d, SBuf: %d, PgSocket: %d, IOBuf: %d",
-		  (int)sizeof(struct event), (int)sizeof(SBuf),
+	log_noise("uv_poll_t: %d, SBuf: %d, PgSocket: %d, IOBuf: %d",
+		  (int)sizeof(uv_poll_t), (int)sizeof(SBuf),
 		  (int)sizeof(PgSocket), (int)IOBUF_SIZE);
 
 	/* load limits */
@@ -1055,8 +1055,8 @@ int main(int argc, char *argv[])
 			break;
 		case 'V':
 			printf("%s\n", PACKAGE_STRING);
-			printf("libevent %s\nadns: %s\ntls: %s\n",
-			       event_get_version(),
+			printf("libuv %s\nadns: %s\ntls: %s\n",
+			       uv_version_string(),
 			       adns_get_backend(),
 			       tls_backend_version());
 #ifdef USE_SYSTEMD

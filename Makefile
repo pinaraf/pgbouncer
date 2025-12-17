@@ -83,7 +83,7 @@ pgbouncer_SOURCES = \
 	include/common/uthash.h \
 	include/common/uthash_lowercase.h
 
-pgbouncer_CPPFLAGS = -Iinclude $(CARES_CFLAGS) $(LIBEVENT_CFLAGS) $(TLS_CPPFLAGS)
+pgbouncer_CPPFLAGS = -Iinclude $(CARES_CFLAGS) $(LIBUV_CFLAGS) $(TLS_CPPFLAGS)
 
 # include libusual sources directly
 AM_FEATURES = libusual
@@ -103,7 +103,7 @@ DIST_SUBDIRS = doc test
 dist_man_MANS = doc/pgbouncer.1 doc/pgbouncer.5
 
 pgbouncer_LDFLAGS := $(TLS_LDFLAGS)
-pgbouncer_LDADD := $(CARES_LIBS) $(LIBEVENT_LIBS) $(TLS_LIBS) $(LIBS)
+pgbouncer_LDADD := $(CARES_LIBS) $(LIBUV_LIBS) $(TLS_LIBS) $(LIBS)
 LIBS :=
 
 #

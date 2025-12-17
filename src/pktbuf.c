@@ -69,11 +69,7 @@ PktBuf *pktbuf_dynamic(int start_len)
 	if (!buf)
 		return NULL;
 
-	buf->ev = zmalloc(sizeof(*buf->ev));
-	if (!buf->ev) {
-		pktbuf_free(buf);
-		return NULL;
-	}
+	buf->poll_handle = NULL;  /* Allocated when needed in pktbuf_send_queued */
 	buf->buf = malloc(start_len);
 	if (!buf->buf) {
 		pktbuf_free(buf);
